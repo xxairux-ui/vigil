@@ -5,7 +5,18 @@ const FILES = {"app/three-BeeE_iWB.js":"text/javascript","app/vigil-Cif9CWxB.js"
 const CACHE = 'vigil-' + BUILD;
 let key = null;
 
-self.addEventListener('install', () => self.skipWaiting());
+// Each version keeps its own page and lock (fetched fresh as it installs), so a page and its files always match: an
+// open copy never asks an older version for a newer build's files.
+self.addEventListener('install', (e) => {
+  e.waitUntil((async () => {
+    const cache = await caches.open(CACHE);
+    for (const path of ['play.html', 'lock.json']) {
+      const res = await fetch(at(path), { cache: 'reload' });
+      if (res.ok) await cache.put(at(path), res);
+    }
+    await self.skipWaiting();
+  })());
+});
 // The gate locking: forget the key held.
 self.addEventListener('message', (e) => {
   if (e.data === 'lock') key = null;
@@ -45,16 +56,19 @@ async function buildKey(check = false) {
     return null;
   }
   if (key) return key;
+  // This version's own lock (kept as it installed); only if missing, the site's.
   const cache = await caches.open(CACHE);
   let lock;
+  const kept = await cache.match(at('lock.json'));
   try {
-    const res = await fetch(at('lock.json'), { cache: 'no-store' });
-    await cache.put(at('lock.json'), res.clone());
-    lock = await res.json();
+    if (kept) lock = await kept.json();
+    else {
+      const res = await fetch(at('lock.json'), { cache: 'no-store' });
+      await cache.put(at('lock.json'), res.clone());
+      lock = await res.json();
+    }
   } catch {
-    const kept = await cache.match(at('lock.json'));
-    if (!kept) return null;
-    lock = await kept.json();
+    return null;
   }
   try {
     const sealed = b64(lock.key);
@@ -88,13 +102,16 @@ self.addEventListener('fetch', (e) => {
   if (path === 'play.html') {
     e.respondWith((async () => {
       if (!(await buildKey(true))) return Response.redirect(at('./'), 302);
+      // This version's own page (kept as it installed), so its files are the ones this worker unseals.
       const cache = await caches.open(CACHE);
+      const kept = await cache.match(at('play.html'));
+      if (kept) return kept;
       try {
         const res = await fetch(e.request);
         await cache.put(at('play.html'), res.clone());
         return res;
       } catch {
-        return (await cache.match(at('play.html'))) || Response.error();
+        return Response.error();
       }
     })());
     return;

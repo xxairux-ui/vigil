@@ -15,6 +15,16 @@
 <script>
   // Not unlocked here (no service worker in charge): the gate first.
   if (!navigator.serviceWorker || !navigator.serviceWorker.controller) location.replace('./');
+  // A newer version has taken over (it installs in the background as the app opens): move to it at the title
+  // screen, never mid-night.
+  else {
+    let updated = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => (updated = true));
+    setInterval(() => {
+      const state = window.vigil && window.vigil.state;
+      if (updated && (state === 'title' || state === 'loading' || !state)) location.reload();
+    }, 1500);
+  }
 </script>
 </head>
 <body>
