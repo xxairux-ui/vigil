@@ -47,6 +47,10 @@
     say('This browser cannot open Vigil (it needs service workers and Web Crypto, over HTTPS).', true);
     go.disabled = true;
   }
+  // Nothing is under way on the gate: a newer version asking may take over.
+  navigator.serviceWorker?.addEventListener('message', (e) => {
+    if (e.data === 'state?' && e.ports[0]) e.ports[0].postMessage('idle');
+  });
   const idb = () => new Promise((res, rej) => {
     const r = indexedDB.open('vigil-lock', 1);
     r.onupgradeneeded = () => r.result.createObjectStore('k');
@@ -65,7 +69,27 @@
   const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
   async function open() {
     // The worker in charge before the game's page loads, so its files are unsealed as it asks for them.
-    await navigator.serviceWorker.register('./sw.js', { scope: './' });
+    const reg = await navigator.serviceWorker.register('./sw.js', { scope: './' });
+    // A newer version: let it install (it fetches only the files that changed) and take over now, as nothing is
+    // under way here. It waits, though, while another copy of the game is mid-night.
+    await reg.update().catch(() => {});
+    const fresh = reg.installing;
+    if (fresh) {
+      say('Updating…');
+      await new Promise((res) => {
+        const done = () => fresh.state !== 'installing' && res();
+        fresh.addEventListener('statechange', done);
+        done();
+      });
+    }
+    if (reg.waiting && reg.active) {
+      const taken = new Promise((res) => {
+        navigator.serviceWorker.addEventListener('controllerchange', res, { once: true });
+        setTimeout(res, 5000);
+      });
+      reg.waiting.postMessage('skip');
+      await taken;
+    }
     await navigator.serviceWorker.ready;
     location.replace('./play.html');
   }
