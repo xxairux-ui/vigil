@@ -19,13 +19,16 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Vigil Unity">
 <meta name="theme-color" content="#0a0c11">
-<meta name="vigil-commit" content="a2390ee">
+<meta name="vigil-commit" content="74be134">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Vigil on Unity</title>
 <style>
   html,body{margin:0;height:100%;background:#0a0c11;overflow:hidden;overscroll-behavior:none}
-  #unity-canvas{position:fixed;inset:0;width:100%;height:100%;display:block;background:#0a0c11;touch-action:none}
+  /* The canvas fills a box sized by CSS alone, the dynamic viewport's height where the browser knows it (100dvh), else
+     100%: no number a script measured can hold it short (the owner's black band, November 13). */
+  #unity-container{position:fixed;inset:0;width:100%;height:100%;height:100dvh;overflow:hidden;background:#0a0c11}
+  #unity-canvas{display:block;width:100%;height:100%;background:#0a0c11;touch-action:none}
   #note{position:fixed;left:0;right:0;bottom:24px;text-align:center;color:#a49a86;font:14px system-ui,sans-serif}
   #step{display:block;margin-top:4px;padding:0 16px;font-size:12px;opacity:.75}
   #full{position:fixed;top:calc(20px + env(safe-area-inset-top));right:calc(20px + env(safe-area-inset-right));z-index:3;
@@ -37,7 +40,7 @@
 </style>
 </head>
 <body>
-<canvas id="unity-canvas" tabindex="-1"></canvas>
+<div id="unity-container"><canvas id="unity-canvas" tabindex="-1"></canvas></div>
 <div id="note"><span id="pct">Loading…</span><span id="step"></span></div>
 <button id="full" type="button" aria-label="Full screen" title="Full screen" hidden>⛶</button>
 <script>
@@ -486,7 +489,17 @@
       Object.assign(session, fields);
       dirty = true;
     };
-    return { add, save, fault, note };
+    // This session's report, offered now (the Settings' "Copy a report" row, Plugins/WebGL/VigilScreen.jslib): the
+    // installed app has no address bar for ?report.
+    const now = async () => {
+      save();
+      let text = report({ session, log: lines.slice() }, 'Vigil on Unity: this session');
+      try {
+        text += await packed(night ? record(night) : '');
+      } catch {}
+      offer(text, 'This session’s report: copy it and send it.');
+    };
+    return { add, save, fault, note, now };
   })();
   const boot = (text) => {
     console.log('Vigil boot +' + (performance.now() / 1000).toFixed(1) + 's: ' + text);
@@ -615,8 +628,11 @@
     const c = getComputedStyle(probe);
     return [c.paddingTop, c.paddingRight, c.paddingBottom, c.paddingLeft].map((v) => parseFloat(v) || 0).join(' ');
   };
-  // For the player (Plugins/WebGL/VigilScreen.jslib, Play/ScreenEdges): the insets, then the CSS pixels' height.
-  window.vigilInsets = () => insets() + ' ' + innerHeight;
+  // For the player (Plugins/WebGL/VigilScreen.jslib, Play/ScreenEdges): the insets, then the canvas's height in CSS
+  // pixels (its box is CSS's alone: #unity-container).
+  window.vigilInsets = () => insets() + ' ' + (canvas.clientHeight || innerHeight);
+  // For the player's Settings (Plugins/WebGL/VigilScreen.jslib): this session's report, offered to copy.
+  window.vigilReport = () => recorder.now();
   {
     const box = document.body.appendChild(document.createElement('div'));
     box.id = 'debug';
@@ -686,13 +702,12 @@
       disagreed = told;
       return [w, h];
     };
+    // The canvas's size is CSS's alone now (#unity-container); the measure is kept for the log, and a scroll iOS left
+    // under the page after an app switch or the keyboard is undone.
     const apply = ([w, h]) => {
       const size = w + '×' + h;
       if (size === applied || w < 50 || h < 50) return size;
       applied = size;
-      canvas.style.width = w + 'px';
-      canvas.style.height = h + 'px';
-      // iOS can leave the page scrolled under the canvas after an app switch or the keyboard.
       if (scrollX || scrollY) scrollTo(0, 0);
       return size;
     };
@@ -713,11 +728,56 @@
       timers = [];
       read(why, null, 6);
     };
+    // What the page sees (the lead, November 13: the black band after a return in the installed app): every size the
+    // fit could follow, logged to the boot log and the report, marked with what fired it; on a return, once a second
+    // for ten seconds after as well.
+    const container = document.getElementById('unity-container');
+    const box = (el) => {
+      const b = el.getBoundingClientRect();
+      return Math.round(b.width) + '×' + Math.round(b.height) + (b.left || b.top ? '@' + Math.round(b.left) + ',' + Math.round(b.top) : '');
+    };
+    const seen = (why) => {
+      const v = window.visualViewport;
+      const de = document.documentElement;
+      const line = why + ': window ' + innerWidth + '×' + innerHeight + ' outer ' + outerWidth + '×' + outerHeight +
+        (v ? ' visual ' + Math.round(v.width) + '×' + Math.round(v.height) + ' top ' + Math.round(v.offsetTop) + ' scale ' + v.scale.toFixed(2) : '') +
+        ' root ' + de.clientWidth + '×' + de.clientHeight + ' screen ' + screen.width + '×' + screen.height + ' dpr ' + devicePixelRatio +
+        ' canvas ' + box(canvas) + ' backing ' + canvas.width + '×' + canvas.height + ' box ' + box(container) +
+        ' body ' + box(document.body) + ' html ' + box(de) + ' ' + app() + ' safe ' + insets() + ' ' + document.visibilityState;
+      boot('fit ' + line);
+      recorder.add('fit', line);
+    };
+    let burst = 0;
+    const returned = (why) => {
+      clearInterval(burst);
+      let n = 0;
+      burst = setInterval(() => {
+        seen(why + ' +' + ++n + 's');
+        if (n >= 10) clearInterval(burst);
+      }, 1000);
+    };
     for (const name of ['resize', 'orientationchange', 'pageshow', 'focus'])
-      addEventListener(name, () => fit(name));
-    document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && fit('shown again'));
+      addEventListener(name, () => {
+        seen(name);
+        fit(name);
+        if (name === 'pageshow' || name === 'focus') returned(name);
+      });
+    document.addEventListener('visibilitychange', () => {
+      seen('visibility ' + document.visibilityState);
+      if (document.visibilityState === 'visible') {
+        fit('shown again');
+        returned('shown again');
+      }
+    });
     if (window.visualViewport)
-      for (const name of ['resize', 'scroll']) visualViewport.addEventListener(name, () => fit('visual viewport ' + name));
+      for (const name of ['resize', 'scroll'])
+        visualViewport.addEventListener(name, () => {
+          if (name === 'resize') seen('visual viewport resize');
+          fit('visual viewport ' + name);
+        });
+    // The device, once: its screen in points, its pixel ratio, its browser and how the page runs.
+    recorder.add('device', 'screen ' + screen.width + '×' + screen.height + ' pt, dpr ' + devicePixelRatio + ', ' + app() + ', ' + navigator.userAgent);
+    seen('open');
     setInterval(() => {
       const [w, h] = measure();
       if (w + '×' + h !== applied) fit('watch');
