@@ -1,0 +1,849 @@
+<!doctype html>
+<html lang="en">
+<head>
+<script>
+  // Not unlocked here (no worker of this site in charge): the gate first.
+  if (!navigator.serviceWorker || !navigator.serviceWorker.controller) {
+    console.log('Vigil boot: no worker of this site in charge of the page: back to the gate');
+    location.replace('./');
+    window.stop();
+  }
+  navigator.serviceWorker && navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data === 'state?' && e.ports[0]) e.ports[0].postMessage('idle');
+  });
+</script>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Vigil Unity">
+<meta name="theme-color" content="#0a0c11">
+<meta name="vigil-commit" content="97ea291">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Vigil on Unity</title>
+<style>
+  html,body{margin:0;height:100%;background:#0a0c11;overflow:hidden;overscroll-behavior:none}
+  #unity-canvas{position:fixed;inset:0;width:100%;height:100%;display:block;background:#0a0c11;touch-action:none}
+  #note{position:fixed;left:0;right:0;bottom:24px;text-align:center;color:#a49a86;font:14px system-ui,sans-serif}
+  #step{display:block;margin-top:4px;padding:0 16px;font-size:12px;opacity:.75}
+  #full{position:fixed;top:calc(20px + env(safe-area-inset-top));right:calc(20px + env(safe-area-inset-right));z-index:3;
+    width:44px;height:44px;border:1px solid #d8b468;border-radius:4px;background:#0a0c11cc;color:#f3d999;
+    font:22px system-ui,sans-serif;line-height:1;cursor:pointer;touch-action:manipulation}
+  #full[hidden]{display:none}
+  #debug{position:fixed;right:8px;bottom:8px;padding:6px 8px;background:#000a;color:#e9e2d0;font:12px ui-monospace,monospace;
+    white-space:pre;pointer-events:none;z-index:2}
+</style>
+</head>
+<body>
+<canvas id="unity-canvas" tabindex="-1"></canvas>
+<div id="note"><span id="pct">Loading…</span><span id="step"></span></div>
+<button id="full" type="button" aria-label="Full screen" title="Full screen" hidden>⛶</button>
+<script>
+  // The Unity player (unity/, Assets/Vigil/Editor/VigilBuild.cs): WebGPU where the browser has it, else WebGL 2.
+  //   ?webgl   WebGL 2 even where WebGPU is offered (hides navigator.gpu from Unity's loader)
+  //   ?debug   the page's, the canvas's and the viewport's sizes, live, in the corner (shown for the first 15 seconds
+  //            of every start without it, so an installed app reports them too)
+  // Each step of the boot is logged to the console (with the seconds since the page opened), the service worker's too
+  // (it posts its steps here), and the latest is shown under the loading figure.
+  const step = document.getElementById('step');
+  // The flight recorder: the last 400 lines of the page's and the player's log (the boot's steps, the console's warnings
+  // and errors, Unity's messages) and a heartbeat every 2 seconds (time, memory, canvas, graphics), kept in this
+  // browser. A session that stopped without the page being closed or hidden (an iPad's tab killed for memory, a hang)
+  // is reported on the next start: a banner offers its report to copy. ?report shows the last session's report always.
+  const recorder = (() => {
+    const LOG = 'vigil-unity-log';
+    const LAST = 'vigil-unity-session';
+    const CRASH = 'vigil-unity-crash';
+    // The night's record as the player hands it over (Play/NightKept), and the one a report carries.
+    const NIGHT = 'vigil-unity-night';
+    const CRASH_NIGHT = 'vigil-unity-crash-night';
+    // The last night offered in a report (its print), so each night held is offered once, whatever ended its session.
+    const NIGHT_OFFERED = 'vigil-unity-night-offered';
+    // Each page of the game keeps its own log, session and night, under keys with its id: two pages open at once (a
+    // Safari tab and the installed app share the site's storage) each write their own, and the one closed last no
+    // longer writes over the other's. (A night of the owner's was lost so: the page put away at 6.7 s closed last, over
+    // the log of the page that played.) PAGES lists the last few pages' ids; a key without an id is a build's before.
+    const ID = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const PAGES = 'vigil-unity-pages';
+    const of = (key, id) => (id ? key + '-' + id : key);
+    // The night is kept in pieces, so each write is only what is new (a whole record rewritten every 5 s grew to
+    // 700 KB in half an hour, and a write of it blocks the page): NIGHT its opening, where it stands and how many pieces;
+    // NIGHT-<k> each piece's closed spans and actions.
+    const readNight = (id) => {
+      const n = JSON.parse(store.get(of(NIGHT, id)) || 'null');
+      if (!n || !n.parts) return n;
+      const spans = [];
+      const actions = [];
+      for (let k = 0; k < n.parts; k++) {
+        const part = JSON.parse(store.get(of(NIGHT, id) + '-' + k) || '{}');
+        if (part.s) spans.push(part.s);
+        if (part.a) actions.push(part.a);
+      }
+      return { head: n.head, spans: spans.join(','), actions: actions.join(','), open: n.open, ticks: n.ticks };
+    };
+    const store = {
+      get: (k) => {
+        try {
+          return localStorage.getItem(k);
+        } catch {
+          return null;
+        }
+      },
+      set: (k, v) => {
+        try {
+          localStorage.setItem(k, v);
+        } catch {}
+      },
+      remove: (k) => {
+        try {
+          localStorage.removeItem(k);
+        } catch {}
+      },
+    };
+    const started = new Date().toISOString();
+    const lines = [];
+    const session = { started, beat: started, ended: '', seconds: 0, page: location.pathname + location.search };
+    // Which build this session runs, for its report's first line: the sealed site's build (its lock.json names it) and
+    // the rpg commit it was built from (tools/package-unity-pages.mjs stamps it on the page).
+    {
+      const commit = document.querySelector('meta[name="vigil-commit"]');
+      session.build = commit ? 'rpg ' + commit.content : '';
+      fetch('./lock.json', { cache: 'no-store' })
+        .then((r) => r.json())
+        .then((j) => {
+          if (j && j.build) session.build = 'build ' + j.build + (session.build ? ', ' + session.build : '');
+        })
+        .catch(() => {});
+    }
+    let dirty = false;
+    const save = () => {
+      dirty = false;
+      store.set(of(LOG, ID), JSON.stringify(lines));
+      store.set(of(LAST, ID), JSON.stringify(session));
+    };
+    // Each distinct error once (its first 160 characters): when first seen, how often, and a stack where one is given,
+    // so a repeated error neither floods the log nor pushes the others out.
+    session.errors = {};
+    session.errorCount = 0;
+    const fault = (kind, text, stack) => {
+      const key = String(text).slice(0, 160);
+      session.errorCount++;
+      const seen = session.errors[key];
+      if (seen) seen.count++;
+      else if (Object.keys(session.errors).length < 50)
+        session.errors[key] = {
+          kind,
+          first: '+' + (performance.now() / 1000).toFixed(1) + 's',
+          count: 1,
+          stack: String(stack || new Error().stack || '').slice(0, 1500),
+        };
+    };
+    const add = (kind, text, now) => {
+      lines.push('+' + (performance.now() / 1000).toFixed(1) + 's ' + kind + ' ' + String(text).slice(0, 400));
+      if (lines.length > 400) lines.splice(0, lines.length - 400);
+      dirty = true;
+      if (now) save();
+    };
+    // The earlier pages' records: the one reported is the latest that played a night, else the latest heard; the
+    // others are named in its report (another page of the game open at the same time).
+    const before = (() => {
+      try {
+        const read = (id) => ({
+          id,
+          session: JSON.parse(store.get(of(LAST, id)) || 'null'),
+          log: JSON.parse(store.get(of(LOG, id)) || '[]'),
+          night: readNight(id),
+        });
+        const pages = JSON.parse(store.get(PAGES) || '[]');
+        const earlier = pages.map(read).concat([read(null)]).filter((r) => r.session);
+        const heard = (r) => Date.parse(r.session.beat || r.session.started) || 0;
+        earlier.sort((a, b) => heard(b) - heard(a));
+        const chosen = earlier.find((r) => r.night && r.night.head && r.night.ticks > 0) || earlier[0];
+        // This page in the list, the oldest let go with what they kept (and a build's before's keys, read once).
+        const kept = pages.concat(ID).slice(-4);
+        for (const id of pages.filter((p) => !kept.includes(p)).concat([null])) {
+          const n = JSON.parse(store.get(of(NIGHT, id)) || 'null');
+          for (let k = 0; n && k < (n.parts || 0); k++) store.remove(of(NIGHT, id) + '-' + k);
+          for (const key of [LOG, LAST, NIGHT]) store.remove(of(key, id));
+        }
+        store.set(PAGES, JSON.stringify(kept));
+        if (!chosen) return { session: null, log: [], night: null, others: [] };
+        chosen.others = earlier
+          .filter((r) => r !== chosen)
+          .map((r) => ({ started: r.session.started, ended: r.session.ended, frames: r.session.frames, ticks: r.night ? r.night.ticks : 0 }));
+        return chosen;
+      } catch {
+        return { session: null, log: [], night: null, others: [] };
+      }
+    })();
+    // The record, whole, as NightRecord.Read reads it.
+    const record = (n) =>
+      n && n.head
+        ? n.head + ',"ticks":' + n.ticks + ',"inputs":[' + [n.spans, n.open].filter(Boolean).join(',') +
+          '],"actions":[' + n.actions + ']}'
+        : '';
+    // A night held is told from another by its opening's length, its ticks and its input's length.
+    const nightPrint = (n) => (n && n.head ? n.head.length + ':' + n.ticks + ':' + (n.spans || '').length : '');
+    const unoffered = !!(before.night && before.night.head) && store.get(NIGHT_OFFERED) !== nightPrint(before.night);
+    const report = (r, title) =>
+      [
+        title + (r.session && r.session.build ? ' (' + r.session.build + ')' : ''),
+        'started ' + (r.session && r.session.started) + ', last heard ' + (r.session && r.session.beat) +
+          ', ended ' + ((r.session && r.session.ended) || 'without closing') +
+          (r.others && r.others.length ? '\nother pages of the game open about then: ' + JSON.stringify(r.others) : ''),
+        JSON.stringify(Object.assign({}, r.session, { errors: undefined })),
+        '',
+        ...Object.entries((r.session && r.session.errors) || {}).map(
+          ([text, e]) => 'ERROR ' + e.first + ' x' + e.count + ' (' + e.kind + '): ' + text + (e.stack ? '\n  ' + e.stack.replace(/\n/g, '\n  ') : ''),
+        ),
+        '',
+        ...(r.log || []),
+      ].join('\n');
+    // Reported on the next start: a session that stopped without closing, froze, or hitched for a quarter second.
+    {
+      const b = before.session;
+      const why = !b || !before.log.length ? ''
+        : b.frozen ? 'froze (no new frame for ' + b.frozen + ')'
+        : !b.ended ? 'stopped unexpectedly'
+        : b.errorCount > 0 ? 'logged ' + b.errorCount + ' error' + (b.errorCount > 1 ? 's' : '') + ', first: ' +
+          Object.keys(b.errors || {})[0]
+        : b.hitches > 0 ? 'hitched (' + b.hitches + ' frames over ' + (b.hitchOverMs || 25) + ' ms, the longest ' + b.worstHitchMs + ' ms)'
+        : '';
+      if (why) store.set(CRASH, report(before, 'Vigil on Unity: the last session ' + why));
+    }
+    // The player's record of the night it plays: its opening as it begins, then what is new every 5 seconds of play.
+    let night = null;
+    window.vigilRecorder = {
+      nightStart: (head) => {
+        const old = JSON.parse(store.get(of(NIGHT, ID)) || 'null');
+        for (let k = 0; old && k < (old.parts || 0); k++) store.remove(of(NIGHT, ID) + '-' + k);
+        night = { head, open: '', ticks: 0, parts: 0 };
+        store.set(of(NIGHT, ID), JSON.stringify(night));
+      },
+      nightMore: (spans, actions, open, ticks) => {
+        if (!night) return;
+        if (spans || actions) store.set(of(NIGHT, ID) + '-' + night.parts++, JSON.stringify({ s: spans, a: actions }));
+        night.open = open;
+        night.ticks = ticks;
+        store.set(of(NIGHT, ID), JSON.stringify(night));
+      },
+    };
+    for (const level of ['warn', 'error']) {
+      const real = console[level].bind(console);
+      console[level] = (...args) => {
+        const text = args.map((a) => (a && a.stack) || a).join(' ');
+        // Errors, and Unity's errors printed as warnings (a stripped class, a readback refused, a failure).
+        if (level === 'error' || /error|exception|not supported|doesn't exist|failed|abort/i.test(text))
+          fault(level, text, args.find((a) => a && a.stack)?.stack);
+        add(level, text, level === 'error');
+        real(...args);
+      };
+    }
+    {
+      const real = console.log.bind(console);
+      console.log = (...args) => {
+        add('log', args.join(' '));
+        real(...args);
+      };
+    }
+    setInterval(() => {
+      session.beat = new Date().toISOString();
+      session.seconds = Math.round(performance.now() / 1000);
+      const m = performance.memory;
+      if (m) session.heapMB = Math.round(m.usedJSHeapSize / 1048576);
+      const u = window.unityInstance && window.unityInstance.Module;
+      if (u && u.HEAPU8) session.wasmMB = Math.round(u.HEAPU8.length / 1048576);
+      const c = document.getElementById('unity-canvas');
+      if (c) session.canvas = c.width + 'x' + c.height;
+      session.visible = document.visibilityState;
+      // The session alone (small); the log ring (up to 400 lines) goes at most every 5 s, below.
+      store.set(of(LAST, ID), JSON.stringify(session));
+    }, 2000);
+    // Closed, or put away (an iPad may then end the tab without a word): not a crash.
+    const ended = (why) => {
+      session.ended = why + ' at ' + new Date().toISOString();
+      add('page', why, true);
+    };
+    addEventListener('pagehide', () => ended('page closed'));
+    // How this page came to be, so a tab the system killed and brought back (memory, on an iPhone or iPad) shows as a
+    // fact in the next report: reloaded or newly opened, discarded by the browser, and whether the last session was
+    // in the middle of a night when it stopped; and a page brought back from the back-forward cache.
+    {
+      const nav = performance.getEntriesByType && performance.getEntriesByType('navigation')[0];
+      session.came = nav ? nav.type : 'unknown';
+      session.discarded = !!document.wasDiscarded;
+      if (navigator.deviceMemory) session.deviceMemoryGB = navigator.deviceMemory;
+      const b = before.session;
+      const midNight = !!(before.night && before.night.head && before.night.ticks > 0 && b && !b.ended);
+      session.lastNightUnfinished = midNight;
+      if (session.discarded || midNight || session.came === 'reload')
+        add(
+          'page',
+          'opened by ' + session.came + (session.discarded ? ', discarded by the browser' : '') +
+            (midNight ? ', the last session stopped in the middle of a night (' + before.night.ticks + ' ticks)' : ''),
+          true,
+        );
+    }
+    addEventListener('pageshow', (e) => {
+      if (e.persisted) add('page', 'restored from the back-forward cache', true);
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') ended('page hidden');
+      else {
+        session.ended = '';
+        add('page', 'shown again', true);
+      }
+    });
+    setInterval(() => dirty && save(), 5000);
+    // The frames: Unity draws in requestAnimationFrame, so a frame over 25 ms, or over 1.5 frames at the pace the game
+    // keeps (a capped 30 a second keeps 33 ms), is a hitch (counted by its length, the last 300 kept with their times,
+    // those of 100 ms or more logged), and none for 3 seconds while the page shows is a freeze (kept, so it is
+    // reported even when the page is closed after it).
+    session.frames = 0;
+    session.hitches = 0;
+    session.worstHitchMs = 0;
+    session.hitchBands = { '25-50': 0, '50-100': 0, '100-250': 0, '250+': 0 };
+    session.hitchTimes = [];
+    let lastFrame = 0;
+    let stalled = 0;
+    let pace = 16.7;
+    // The window out of focus (another window or tab in front, on a desktop): the player stops its loop then
+    // (runInBackground off), so the gap is no freeze and no hitch. Marked in the log, and not counted.
+    let unfocused = false;
+    addEventListener('blur', () => {
+      unfocused = true;
+      lastFrame = 0;
+      add('page', 'window out of focus (the game pauses)', true);
+    });
+    addEventListener('focus', () => {
+      unfocused = false;
+      lastFrame = 0;
+      add('page', 'window in focus again', true);
+    });
+    // What runs between frames: each timer's callback of 4 ms or more (the page's own and Unity's), kept until the next
+    // frame, so a late frame names what ran before it.
+    let tasks = [];
+    const timed = (real) => (fn, ms, ...rest) =>
+      real(
+        typeof fn !== 'function'
+          ? fn
+          : (...a) => {
+              const t0 = performance.now();
+              try {
+                return fn(...a);
+              } finally {
+                const took = performance.now() - t0;
+                if (took >= 4 && tasks.length < 8)
+                  tasks.push((fn.name || String(fn).replace(/\s+/g, ' ').slice(0, 40)) + ' ' + Math.round(took) + ' ms');
+              }
+            },
+        ms,
+        ...rest,
+      );
+    window.setTimeout = timed(window.setTimeout.bind(window));
+    window.setInterval = timed(window.setInterval.bind(window));
+    // Two loops ask for frames, both Unity's: its main loop (the same function asked for each frame) and its measure of
+    // the display's rate (a new one each frame). A frame is the main loop's: its gap from the last (the clock as it
+    // starts, as Unity's own count reads it), the display's own time for it (t, the frame's timestamp: a gap of
+    // about 2 frames there is a frame the display missed, about 1 a frame begun late), how late it began after t, and
+    // how long the main loop's last frame ran. A late one keeps all of these with what ran before it (hitchDetail).
+    const mainLoop = new WeakSet();
+    let lastT = 0;
+    let lastRan = 0;
+    let ranMost = 0;
+    let lateMost = 0;
+    session.hitchDetail = [];
+    const realRaf = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = (callback) => {
+      const main = mainLoop.has(callback);
+      if (!main) mainLoop.add(callback);
+      return realRaf((t) => {
+        if (!main) return callback(t);
+        const now = performance.now();
+        // A frame drawn: the page shows and the game runs, whatever focus said (iOS can send a blur with no focus
+        // after it, and the frames were then not counted for the rest of the session).
+        if (unfocused) {
+          unfocused = false;
+          lastFrame = 0;
+          add('page', 'frames drawn again: in focus after all', true);
+        }
+        const late = now - t;
+        lateMost = Math.max(lateMost, late);
+        if (lastFrame && !unfocused && document.visibilityState === 'visible') {
+          const gap = Math.round(now - lastFrame);
+          if (stalled) {
+            add('freeze', 'frames again after ' + (gap / 1000).toFixed(1) + ' s', true);
+            stalled = 0;
+          } else if (gap > (session.hitchOverMs = Math.round(Math.max(25, 1.5 * pace)))) {
+            session.hitches++;
+            session.worstHitchMs = Math.max(session.worstHitchMs, gap);
+            session.hitchBands[gap < 50 ? '25-50' : gap < 100 ? '50-100' : gap < 250 ? '100-250' : '250+']++;
+            session.hitchTimes.push((now / 1000).toFixed(1) + 's:' + gap);
+            if (session.hitchTimes.length > 300) session.hitchTimes.shift();
+            session.hitchDetail.push(
+              (now / 1000).toFixed(1) + 's ' + gap + ' ms: display ' + Math.round(t - lastT) + ', began ' +
+                Math.round(late) + ' late, last ran ' + Math.round(lastRan) + (tasks.length ? '; ' + tasks.join(', ') : ''),
+            );
+            if (session.hitchDetail.length > 80) session.hitchDetail.shift();
+            if (gap >= 100) add('hitch', gap + ' ms between frames', gap >= 250);
+          }
+          session.frames++;
+          // The usual frame: a slow average of the frames that were not hitches.
+          if (gap < 100) pace += (Math.min(gap, 1.5 * pace) - pace) * 0.02;
+        }
+        tasks = [];
+        lastT = t;
+        lastFrame = now;
+        try {
+          return callback(t);
+        } finally {
+          lastRan = performance.now() - now;
+          ranMost = Math.max(ranMost, lastRan);
+        }
+      });
+    };
+    // Every 5 s, the main loop's longest frame and latest start (Unity's own count sees neither the browser's part
+    // nor a late start).
+    setInterval(() => {
+      if (!lastFrame || document.visibilityState !== 'visible') return;
+      add('pace', 'main loop at most ' + Math.round(ranMost) + ' ms a frame, began at most ' + Math.round(lateMost) + ' ms late');
+      ranMost = lateMost = 0;
+    }, 5000);
+    setInterval(() => {
+      const gap = performance.now() - lastFrame;
+      if (!lastFrame || stalled || unfocused || document.visibilityState !== 'visible' || gap < 3000) return;
+      stalled = 1;
+      session.frozen = (gap / 1000).toFixed(1) + ' s at ' + new Date().toISOString();
+      add('freeze', 'no new frame for ' + (gap / 1000).toFixed(1) + ' s', true);
+    }, 1000);
+    // Put away and back: the gap is the page's, not a hitch.
+    document.addEventListener('visibilitychange', () => (lastFrame = 0));
+    const offer = (text, title) => {
+      const bar = document.body.appendChild(document.createElement('div'));
+      bar.style.cssText =
+        'position:fixed;left:8px;right:8px;top:calc(8px + env(safe-area-inset-top));z-index:5;padding:10px;' +
+        'background:#141821f2;border:1px solid #d8b468;border-radius:6px;color:#e9e2d0;font:14px system-ui,sans-serif';
+      const p = bar.appendChild(document.createElement('div'));
+      p.textContent = title;
+      const area = bar.appendChild(document.createElement('textarea'));
+      area.value = text;
+      area.readOnly = true;
+      area.style.cssText = 'display:block;width:100%;box-sizing:border-box;height:30vh;margin:8px 0;font:11px ui-monospace,monospace';
+      const button = (label, act) => {
+        const b = bar.appendChild(document.createElement('button'));
+        b.type = 'button';
+        b.textContent = label;
+        b.style.cssText = 'margin-right:8px;padding:8px 14px;font:14px system-ui,sans-serif;touch-action:manipulation';
+        b.addEventListener('click', act);
+        return b;
+      };
+      const copy = button('Copy report', () => {
+        area.select();
+        const done = () => (copy.textContent = 'Copied');
+        if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, () => document.execCommand('copy') && done());
+        else if (document.execCommand('copy')) done();
+      });
+      button('Close', () => {
+        bar.remove();
+        store.set(CRASH, '');
+        store.set(CRASH_NIGHT, '');
+      });
+    };
+    // The night, gzipped and in base64, after the report's text (a few tens of KB for a night of minutes).
+    const packed = async (text) => {
+      if (!text || !window.CompressionStream) return text ? '\n\nNIGHT RECORD (json):\n' + text : '';
+      const stream = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'));
+      const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+      let bin = '';
+      for (let k = 0; k < bytes.length; k += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(k, k + 0x8000));
+      return '\n\nNIGHT RECORD (gzip, base64):\n' + btoa(bin);
+    };
+    // On a start: the last session's report if it had one, else the last night held if it was never offered (so a
+    // night can always be sent, whatever ended its session); either carries the last night held (the record the player
+    // kept as it played: tools/unity/night-from-report.mjs plays it again). Offered once: the next night may then
+    // take its place in the store, the banner keeping its copy while the page is open. ?report always shows one.
+    addEventListener('DOMContentLoaded', async () => {
+      const asked = new URLSearchParams(location.search).has('report');
+      let crash = store.get(CRASH);
+      let title = crash
+        ? crash.split('\n')[0].replace('Vigil on Unity: the last session', 'The last session') + '. Copy this report and send it.'
+        : '';
+      if (!crash && (asked || unoffered)) {
+        crash = asked ? report(before, 'Vigil on Unity: the last session') : 'Vigil on Unity: the last night’s record';
+        title = asked ? 'The last session’s report: copy it and send it.' : 'Your last night’s record: copy it and send it.';
+      }
+      if (!crash) return;
+      try {
+        crash += await packed(store.get(CRASH_NIGHT) || record(before.night));
+      } catch {}
+      store.set(NIGHT_OFFERED, nightPrint(before.night));
+      offer(crash, title);
+    });
+    // What the report's header should say of the device (its browser, its graphics), set once known.
+    const note = (fields) => {
+      Object.assign(session, fields);
+      dirty = true;
+    };
+    return { add, save, fault, note };
+  })();
+  const boot = (text) => {
+    console.log('Vigil boot +' + (performance.now() / 1000).toFixed(1) + 's: ' + text);
+    if (step) step.textContent = text;
+  };
+  if (navigator.serviceWorker)
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      if (e.data && e.data.vigilLog) boot('[worker] ' + e.data.vigilLog);
+    });
+  window.addEventListener('error', (e) => {
+    recorder.fault('page', e.message || e.type, e.error && e.error.stack);
+    boot('error: ' + (e.message || e.error || e.type) + (e.filename ? ' @' + e.filename + ':' + e.lineno : ''));
+    recorder.save();
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    recorder.fault('promise', String(e.reason), e.reason && e.reason.stack);
+    boot('unhandled: ' + ((e.reason && e.reason.stack) || e.reason));
+    recorder.save();
+  });
+  const query = new URLSearchParams(location.search);
+  // A device whose WebGPU failed (Safari can lose its GPU device, or refuse a texture, on a later start) plays on
+  // WebGL 2 for a week, the same build's other graphics: kept in this browser, tried again after.
+  const GL_KEY = 'vigil-unity-webgl-until';
+  const glUntil = (() => {
+    try {
+      return Number(localStorage.getItem(GL_KEY)) || 0;
+    } catch {
+      return 0;
+    }
+  })();
+  const onWebGl = query.has('webgl') || (!query.has('webgpu') && Date.now() < glUntil);
+  // The report's header: the browser, the graphics used, whether WebGPU was offered (and why it is not used), the
+  // GPU as the browser names it.
+  {
+    const hadGpu = !!navigator.gpu;
+    recorder.note({
+      ua: navigator.userAgent,
+      graphics: hadGpu && !onWebGl ? 'WebGPU' : 'WebGL 2',
+      webgpu: !hadGpu ? 'not offered by the browser'
+        : !onWebGl ? 'offered and used'
+        : query.has('webgl') ? 'offered; ?webgl asks for WebGL 2'
+        : 'offered; on WebGL 2 until ' + new Date(glUntil).toISOString() + ' after a WebGPU failure',
+    });
+    try {
+      const gl = document.createElement('canvas').getContext('webgl2');
+      const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
+      if (gl) recorder.note({ webglRenderer: String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER)) });
+      const lose = gl && gl.getExtension('WEBGL_lose_context');
+      if (lose) lose.loseContext();
+    } catch {}
+    if (hadGpu && !onWebGl)
+      navigator.gpu
+        .requestAdapter()
+        .then((a) => {
+          const i = a && a.info;
+          if (i) recorder.note({ gpu: [i.vendor, i.architecture, i.device, i.description].filter(Boolean).join(' ') || 'unnamed' });
+        })
+        .catch(() => {});
+    // The compressed textures the device can take: the adapter's features, and those Unity asks its device for.
+    // Unity unpacks a texture to 32 bits a texel only where its device lacks the format, so a format in both lists is
+    // sampled as shipped (the report's VIGIL_TEXTURES line reads Unity's own answer, SystemInfo.SupportsTextureFormat).
+    if (hadGpu && !onWebGl && window.GPUAdapter) {
+      const real = GPUAdapter.prototype.requestDevice;
+      GPUAdapter.prototype.requestDevice = function (descriptor) {
+        const compression = (list) => [...(list || [])].filter((f) => /^texture-compression/.test(f)).sort().join(' ') || 'none';
+        const textures = 'adapter has ' + compression(this.features) + '; Unity asked its device for ' +
+          compression(descriptor && descriptor.requiredFeatures);
+        recorder.note({ textures });
+        boot('compressed textures: ' + textures);
+        return real.call(this, descriptor);
+      };
+    }
+  }
+  if (onWebGl) Object.defineProperty(Navigator.prototype, 'gpu', { get: () => undefined });
+  /** A WebGPU failure: this device on WebGL 2 from now on (for a week), and the player started again on it. */
+  const fallBack = (why) => {
+    if (onWebGl) return false;
+    recorder.note({ webgpu: 'failed: ' + String(why).slice(0, 160) });
+    boot('WebGPU failed (' + String(why).slice(0, 160) + '): starting again on WebGL 2');
+    try {
+      localStorage.setItem(GL_KEY, String(Date.now() + 7 * 24 * 3600 * 1000));
+    } catch {}
+    const next = new URLSearchParams(location.search);
+    next.set('webgl', '');
+    location.replace(location.pathname + '?' + next.toString().replace(/=(&|$)/g, '$1'));
+    return true;
+  };
+  const gpuError = (message) => /GPUDevice|GPUAdapter|WebGPU|wgpu|GPUBuffer|GPUTexture|device (was )?lost/i.test(String(message));
+  const canvas = document.getElementById('unity-canvas');
+  const note = document.getElementById('note');
+  const pct = document.getElementById('pct');
+  // Full screen, where the browser lets a page have it (an iPad, a desktop; an iPhone may not): the whole document,
+  // not the canvas, so Unity keeps sizing the canvas by its box (a full-screen canvas parent makes Unity scale it).
+  const root = document.documentElement;
+  const canFull = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+  const isFull = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+  const full = document.getElementById('full');
+  const nudge = () => {
+    for (const ms of [0, 250, 750, 1500]) setTimeout(() => window.dispatchEvent(new Event('resize')), ms);
+  };
+  if (canFull) {
+    full.hidden = false;
+    full.addEventListener('click', () => {
+      const ask = root.requestFullscreen || root.webkitRequestFullscreen;
+      if (ask) Promise.resolve(ask.call(root, { navigationUI: 'hide' })).catch(() => {});
+    });
+    for (const name of ['fullscreenchange', 'webkitfullscreenchange'])
+      document.addEventListener(name, () => {
+        full.hidden = isFull();
+        nudge();
+      });
+  }
+  // How the page is running (an installed app or a browser tab) and the safe-area insets the system gives it (top,
+  // right, bottom, left): an app installed without the status bar's black-translucent style has the bar's space kept
+  // out of the page, and none of it shows as an inset.
+  const app = () =>
+    ['fullscreen', 'standalone', 'minimal-ui'].find((m) => matchMedia(`(display-mode: ${m})`).matches) ||
+    (navigator.standalone ? 'standalone' : 'browser');
+  const probe = document.body.appendChild(document.createElement('div'));
+  probe.style.cssText =
+    'position:fixed;visibility:hidden;pointer-events:none;padding:env(safe-area-inset-top) ' +
+    'env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)';
+  const insets = () => {
+    const c = getComputedStyle(probe);
+    return [c.paddingTop, c.paddingRight, c.paddingBottom, c.paddingLeft].map((v) => parseFloat(v) || 0).join(' ');
+  };
+  // For the player (Plugins/WebGL/VigilScreen.jslib, Play/ScreenEdges): the insets, then the CSS pixels' height.
+  window.vigilInsets = () => insets() + ' ' + innerHeight;
+  {
+    const box = document.body.appendChild(document.createElement('div'));
+    box.id = 'debug';
+    const show = () => {
+      const v = window.visualViewport;
+      box.textContent =
+        `window ${innerWidth}×${innerHeight} @${devicePixelRatio}\n` +
+        (v ? `visual ${Math.round(v.width)}×${Math.round(v.height)}\n` : '') +
+        `screen ${screen.width}×${screen.height}  root ${document.documentElement.clientWidth}×${document.documentElement.clientHeight}\n` +
+        `canvas ${canvas.clientWidth}×${canvas.clientHeight} css, ${canvas.width}×${canvas.height} px\n` +
+        `gpu ${'gpu' in navigator && navigator.gpu ? 'yes' : 'no'}  fullscreen ${canFull ? (isFull() ? 'on' : 'off') : 'no'}\n` +
+        `${app()}  safe ${insets()}`;
+    };
+    show();
+    const timer = setInterval(show, 500);
+    if (!query.has('debug'))
+      setTimeout(() => {
+        clearInterval(timer);
+        box.remove();
+      }, 15000);
+  }
+  // An app opened from the home screen can change its viewport just after it opens (the status bar, the safe areas,
+  // the orientation settling): Unity starts once the size has held for a few checks, so it starts at the screen's size.
+  const settled = () =>
+    new Promise((resolve) => {
+      let w = canvas.clientWidth;
+      let h = canvas.clientHeight;
+      let same = 0;
+      const timer = setInterval(() => {
+        if (canvas.clientWidth === w && canvas.clientHeight === h) {
+          if (++same >= 3 || performance.now() > 3000) {
+            clearInterval(timer);
+            boot('viewport settled at ' + w + '×' + h);
+            resolve();
+          }
+        } else {
+          w = canvas.clientWidth;
+          h = canvas.clientHeight;
+          same = 0;
+        }
+      }, 100);
+    });
+  // The canvas re-fit whenever its size may have changed. An app on an iPhone brought back from another app can keep
+  // its old layout, with no resize (the owner's black bar, November 12, 2026): so the viewport is measured here, on every
+  // event that may change it and every second besides, and the canvas set to it in CSS pixels, read again a few times
+  // until two readings agree. Unity reads the canvas's box each frame and follows it; ScreenEdges reads the insets.
+  const fit = (() => {
+    let applied = '';
+    let logged = '';
+    let timers = [];
+    const measure = () => {
+      const v = window.visualViewport;
+      // The visual viewport, unless a pinch has zoomed it: then the layout one.
+      const useVisual = v && v.width > 0 && v.height > 0 && Math.abs(v.scale - 1) < 0.01;
+      return [Math.round(useVisual ? v.width : innerWidth), Math.round(useVisual ? v.height : innerHeight)];
+    };
+    const apply = ([w, h]) => {
+      const size = w + '×' + h;
+      if (size === applied || w < 50 || h < 50) return size;
+      applied = size;
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+      // iOS can leave the page scrolled under the canvas after an app switch or the keyboard.
+      if (scrollX || scrollY) scrollTo(0, 0);
+      return size;
+    };
+    const read = (why, previous, left) => {
+      const now = measure();
+      const size = apply(now);
+      if (previous === size || left === 0) {
+        if (size !== logged) {
+          if (logged) boot('viewport settled at ' + size + ' (' + why + ')');
+          logged = size;
+        }
+        return;
+      }
+      timers.push(setTimeout(() => read(why, size, left - 1), left > 3 ? 100 : 300));
+    };
+    const fit = (why) => {
+      for (const t of timers) clearTimeout(t);
+      timers = [];
+      read(why, null, 6);
+    };
+    for (const name of ['resize', 'orientationchange', 'pageshow', 'focus'])
+      addEventListener(name, () => fit(name));
+    document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && fit('shown again'));
+    if (window.visualViewport)
+      for (const name of ['resize', 'scroll']) visualViewport.addEventListener(name, () => fit('visual viewport ' + name));
+    setInterval(() => {
+      const [w, h] = measure();
+      if (w + '×' + h !== applied) fit('watch');
+    }, 1000);
+    fit('open');
+    return fit;
+  })();
+  // For the checks (tools/unity/fit.test.mjs): a fit asked for.
+  window.vigilFit = fit;
+</script>
+<script>boot('page open; loading Unity\'s loader');</script>
+<script src="Build/WebGPU.loader.js" onerror="boot('Unity\'s loader failed to load')"></script>
+<script>
+  // The share of the loading figure the game's data takes when it is fetched here, part by part (dataFrom).
+  const DATA_SHARE = 0.85;
+  let dataShare = 0;
+  let joined = null;
+  let stall = 0;
+  const shortUrl = (url) => String(url).replace(location.origin, '').slice(0, 80);
+  // Unity's loader drops the reason a download failed: the data's fetch logs it here (the reading too).
+  const realFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => {
+    const url = String((input && input.url) || input);
+    if (!/\.data|^blob:/.test(url)) return realFetch(input, init);
+    return realFetch(input, init).then(
+      (res) => {
+        boot('fetched ' + shortUrl(url) + ': HTTP ' + res.status + ', ' + (res.headers.get('Content-Length') || '?') + ' bytes');
+        if (!res.body || res.type === 'opaque') return res;
+        const reader = res.body.getReader();
+        const body = new ReadableStream({
+          async pull(c) {
+            try {
+              const { done, value } = await reader.read();
+              if (done) c.close();
+              else c.enqueue(value);
+            } catch (err) {
+              boot('reading ' + shortUrl(url) + ' failed: ' + err);
+              c.error(err);
+            }
+          },
+          cancel: (why) => reader.cancel(why),
+        });
+        return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
+      },
+      (err) => {
+        boot('fetching ' + shortUrl(url) + ' failed: ' + err);
+        throw err;
+      },
+    );
+  };
+  // The game's data from the site's worker part by part (each a short answer: Safari can cut one response that streams
+  // hundreds of MB), joined in a Blob for Unity; where the worker does not offer parts, Unity fetches it itself.
+  async function dataFrom(url) {
+    let info = null;
+    try {
+      const res = await realFetch(url + '?parts');
+      if (res.ok && (res.headers.get('Content-Type') || '').includes('json')) info = await res.json();
+    } catch {}
+    if (!info || info.parts <= 1) return url;
+    boot('the game data: ' + (info.size / 1048576).toFixed(1) + ' MB in ' + info.parts + ' parts');
+    const parts = [];
+    for (let k = 0; k < info.parts; k++) {
+      boot('the game data, part ' + (k + 1) + ' of ' + info.parts);
+      let res;
+      try {
+        res = await realFetch(url + '?part=' + k);
+      } catch (err) {
+        throw new Error('part ' + (k + 1) + ' of the game data could not be fetched: ' + err);
+      }
+      if (!res.ok) throw new Error('part ' + (k + 1) + ' of the game data: HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200));
+      try {
+        parts.push(await res.blob());
+      } catch (err) {
+        throw new Error('part ' + (k + 1) + ' of the game data could not be read: ' + err);
+      }
+      dataShare = DATA_SHARE;
+      pct.textContent = 'Loading… ' + Math.round(((k + 1) / info.parts) * DATA_SHARE * 100) + '%';
+      boot('the game data, part ' + (k + 1) + ' of ' + info.parts + ': ' + (parts[k].size / 1048576).toFixed(1) + ' MB');
+    }
+    const blob = new Blob(parts, { type: 'application/octet-stream' });
+    boot('the game data joined: ' + (blob.size / 1048576).toFixed(1) + ' MB');
+    return URL.createObjectURL(blob);
+  }
+  settled()
+    .then(() => {
+      boot('starting (' + ('gpu' in navigator && navigator.gpu ? 'WebGPU offered' : 'no WebGPU: WebGL 2') + ', ' +
+        app() + ', worker in charge: ' + !!(navigator.serviceWorker && navigator.serviceWorker.controller) +
+        (navigator.deviceMemory ? ', ' + navigator.deviceMemory + ' GB' : '') + ') ' + navigator.userAgent);
+      return dataFrom('Build/WebGPU.data');
+    })
+    .then((data) => {
+      joined = data.startsWith('blob:') ? data : null;
+      boot('starting Unity');
+      let shown = -1;
+      return createUnityInstance(canvas, {
+        dataUrl: data,
+        frameworkUrl: 'Build/WebGPU.framework.js',
+        codeUrl: 'Build/WebGPU.wasm',
+        streamingAssetsUrl: 'StreamingAssets',
+        companyName: "Vigil",
+        productName: "Vigil on Unity",
+        productVersion: "1.0",
+        // At most 2 device pixels a CSS pixel (the three.js game draws at most 1.5 on a phone): a phone's 3 is more
+        // than twice the pixels for nothing a player sees.
+        devicePixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+        // A WebGPU failure while it runs starts the player again on WebGL 2 rather than stopping on Unity's message.
+        errorHandler: (message) => {
+          recorder.fault('unity', message);
+          boot('Unity error: ' + String(message).slice(0, 300));
+          recorder.save();
+          return gpuError(message) && fallBack(message);
+        },
+      }, (progress) => {
+        const now = Math.round((dataShare + (1 - dataShare) * progress) * 100);
+        pct.textContent = 'Loading… ' + now + '%';
+        if (now !== shown) {
+          shown = now;
+          boot('Unity loading ' + now + '%');
+        }
+        // Loaded, but WebGPU never comes up (a failure swallowed inside it hangs the start): a minute on, WebGL 2.
+        if (progress >= 1 && !onWebGl && !stall)
+          stall = setTimeout(() => fallBack('no start a minute after loading'), 60000);
+      });
+    })
+    .then((instance) => {
+      boot('Unity started');
+      clearTimeout(stall);
+      // Unity holds the data now: the joined copy can go.
+      if (joined) URL.revokeObjectURL(joined);
+      window.unityInstance = instance;
+      note.remove();
+      // The viewport can still change after an app opens (as the three.js game finds, main.ts resize): tell the page
+      // again a few times, so Unity measures the canvas once more.
+      nudge();
+      setTimeout(nudge, 1500);
+    })
+    .catch((err) => {
+      if (gpuError(err) && fallBack(err)) return;
+      boot('could not start: ' + err);
+      pct.textContent = 'Could not start: ' + err;
+    });
+</script>
+</body>
+</html>
