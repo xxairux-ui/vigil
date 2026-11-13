@@ -1,10 +1,10 @@
-// Vigil on Unity's service worker (build 28697015b70e): unseals each file of the Unity player with the content key,
+// Vigil on Unity's service worker (build 9dab7b473725): unseals each file of the Unity player with the content key,
 // itself unsealed with the password's key the gate keeps; keeps the sealed copies by hash for offline play.
-const BUILD = "28697015b70e";
+const BUILD = "9dab7b473725";
 /** Each file: its content type, the SHA-256 of its sealed copy (enc/<path>), 1 when gzipped before sealing, how many
  * parts it is sent up in, and its size as served (its Content-Length, so the loader can show its progress); a file in
  * parts (enc/<path>.0, .1, …) has each part's hash and gzip flag in a list. */
-const FILES = {"Build/WebGPU.data":["application/octet-stream",["e5d355edf452c3abba088d35cc3ec027e5e8f2d2566e00e820d303462a92e8bb","cafec0d46555c68425af7eccf74812327df4dded54d84b3257422d84eca4d6ad","266e9b94c583001bb014506fb24fc58d6065a0bab607715e3c8c6ad317fd647c"],[1,1,1],3,243048501],"Build/WebGPU.framework.js":["text/javascript","eb25bb22188d45f480c190b00926b5b9955d48842ec71e07599f8a5a69bd663a",1,1,526776],"Build/WebGPU.loader.js":["text/javascript","5fd0742125190cce2180146f6590b70193fd8fb4ad4b00f85e41261e8a2cce2b",1,1,19568],"Build/WebGPU.wasm":["application/wasm","5a7015b2299ed9a2fae8c578baa60c3f741ca260c8e45a4b0bd0ae70c54471ab",1,1,62420700]};
+const FILES = {"Build/WebGPU.data":["application/octet-stream",["9521ec2aa46eaca9e1892e9b7c36b41b80048bb9b60994a7d2fcda42438eb39c","6723f62758a91f3d11ca3c47f30edca294d382d5d38d12e8ecb91eeb25170dbe","627090603f6711130312f3b67f057328ed6cbbcd7d5746b07d96b64dd3520b99"],[1,1,1],3,243128800],"Build/WebGPU.framework.js":["text/javascript","779f4fc204ef28e723fd329f6a0a358e7ff0058475b0afcd145b18a864a52c4a",1,1,527521],"Build/WebGPU.loader.js":["text/javascript","0741dc2e41726e7f76dbe3d8911a7a5d878ada6eb0de73c3cf3ba981964d4203",1,1,19568],"Build/WebGPU.wasm":["application/wasm","f756fe112fddfb30e5b60ac72a9440a9b2249bdac6a896f6a17be08ceaaccc84",1,1,62662143]};
 const PAGE = 'unity-vigil-build-' + BUILD;
 /** The app's plain files: fresh when online, kept for offline (the installed app opens on the gate). */
 const GATE = ['manifest.webmanifest', 'gate-font.ttf', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'icon-512-maskable.png'];
