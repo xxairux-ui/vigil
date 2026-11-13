@@ -19,7 +19,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Vigil Unity">
 <meta name="theme-color" content="#0a0c11">
-<meta name="vigil-commit" content="a046910">
+<meta name="vigil-commit" content="3911240">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Vigil on Unity</title>
@@ -580,6 +580,8 @@
   const pct = document.getElementById('pct');
   // Full screen, where the browser lets a page have it (an iPad, a desktop; an iPhone may not): the whole document,
   // not the canvas, so Unity keeps sizing the canvas by its box (a full-screen canvas parent makes Unity scale it).
+  // The button stands only while the game loads: once it runs, it lay over the game's pause button (November 13), and
+  // the Settings' Full screen row asks for the same (Plugins/WebGL/VigilScreen.jslib).
   const root = document.documentElement;
   const canFull = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
   const isFull = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
@@ -595,7 +597,7 @@
     });
     for (const name of ['fullscreenchange', 'webkitfullscreenchange'])
       document.addEventListener(name, () => {
-        full.hidden = isFull();
+        full.hidden = isFull() || !!window.unityInstance;
         nudge();
       });
   }
@@ -665,11 +667,24 @@
     let applied = '';
     let logged = '';
     let timers = [];
+    // The page's size: the larger of the visual viewport and the window, unless a pinch has zoomed it (then the
+    // window's). iPadOS, brought back from another app, can go on reporting a visual viewport shorter than the page
+    // (its app switcher's strip), with no resize after: the canvas then stopped 85 points short of the foot (the owner's
+    // black band, November 13). The canvas is fixed to the page, so the larger is the page's whole height. Where the two
+    // disagree, the boot log says so once, for the next report.
+    let disagreed = '';
     const measure = () => {
       const v = window.visualViewport;
-      // The visual viewport, unless a pinch has zoomed it: then the layout one.
-      const useVisual = v && v.width > 0 && v.height > 0 && Math.abs(v.scale - 1) < 0.01;
-      return [Math.round(useVisual ? v.width : innerWidth), Math.round(useVisual ? v.height : innerHeight)];
+      const zoomed = v && Math.abs(v.scale - 1) >= 0.01;
+      const vw = v && v.width > 0 && !zoomed ? v.width : 0;
+      const vh = v && v.height > 0 && !zoomed ? v.height : 0;
+      const w = Math.round(Math.max(vw, innerWidth));
+      const h = Math.round(Math.max(vh, innerHeight));
+      const told = v && !zoomed && (Math.round(vw) !== w || Math.round(vh) !== h)
+        ? 'visual ' + Math.round(vw) + '×' + Math.round(vh) + ', window ' + innerWidth + '×' + innerHeight : '';
+      if (told && told !== disagreed) boot('viewport: ' + told + ': the larger taken');
+      disagreed = told;
+      return [w, h];
     };
     const apply = ([w, h]) => {
       const size = w + '×' + h;
@@ -834,6 +849,7 @@
       if (joined) URL.revokeObjectURL(joined);
       window.unityInstance = instance;
       note.remove();
+      full.hidden = true;
       // The viewport can still change after an app opens (as the three.js game finds, main.ts resize): tell the page
       // again a few times, so Unity measures the canvas once more.
       nudge();
