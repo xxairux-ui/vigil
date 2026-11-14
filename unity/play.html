@@ -19,7 +19,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Vigil Unity">
 <meta name="theme-color" content="#0a0c11">
-<meta name="vigil-commit" content="acc75e3">
+<meta name="vigil-commit" content="d07da00">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Vigil on Unity</title>
@@ -159,14 +159,19 @@
           log: JSON.parse(store.get(of(LOG, id)) || '[]'),
           night: readNight(id),
         });
-        const pages = JSON.parse(store.get(PAGES) || '[]');
-        const earlier = pages.map(read).concat([read(null)]).filter((r) => r.session);
         const heard = (r) => Date.parse(r.session.beat || r.session.started) || 0;
+        // A page that never drew a frame and never closed (put away while loading, then dropped: iOS does) is let go
+        // after 5 minutes unheard, so it is not named as another page open long after.
+        const stale = (r) =>
+          r.session && !r.session.ended && !(r.session.frames > 0) && Date.now() - heard(r) > 5 * 60 * 1000;
+        const listed = JSON.parse(store.get(PAGES) || '[]');
+        const pages = listed.filter((id) => !stale(read(id)));
+        const earlier = pages.map(read).concat([read(null)]).filter((r) => r.session && !stale(r));
         earlier.sort((a, b) => heard(b) - heard(a));
         const chosen = earlier.find((r) => r.night && r.night.head && r.night.ticks > 0) || earlier[0];
         // This page in the list, the oldest let go with what they kept (and a build's before's keys, read once).
         const kept = pages.concat(ID).slice(-4);
-        for (const id of pages.filter((p) => !kept.includes(p)).concat([null])) {
+        for (const id of listed.filter((p) => !kept.includes(p)).concat([null])) {
           const n = JSON.parse(store.get(of(NIGHT, id)) || 'null');
           for (let k = 0; n && k < (n.parts || 0); k++) store.remove(of(NIGHT, id) + '-' + k);
           for (const key of [LOG, LAST, NIGHT]) store.remove(of(key, id));
@@ -204,12 +209,13 @@
         '',
         ...(r.log || []),
       ].join('\n');
-    // Reported on the next start: a session that stopped without closing, froze, or hitched for a quarter second.
+    // Reported on the next start: a session that stopped without closing, froze, or hitched for a quarter second. One
+    // that never drew a frame (put away while it loaded, and dropped) did not stop unexpectedly: it never began.
     {
       const b = before.session;
       const why = !b || !before.log.length ? ''
         : b.frozen ? 'froze (no new frame for ' + b.frozen + ')'
-        : !b.ended ? 'stopped unexpectedly'
+        : !b.ended && b.frames > 0 ? 'stopped unexpectedly'
         : b.errorCount > 0 ? 'logged ' + b.errorCount + ' error' + (b.errorCount > 1 ? 's' : '') + ', first: ' +
           Object.keys(b.errors || {})[0]
         : b.hitches > 0 ? 'hitched (' + b.hitches + ' frames over ' + (b.hitchOverMs || 25) + ' ms, the longest ' + b.worstHitchMs + ' ms)'
