@@ -19,9 +19,9 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Vigil Unity">
 <meta name="theme-color" content="#0a0c11">
-<meta name="vigil-commit" content="c7a6843">
+<meta name="vigil-commit" content="75c4491">
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Vigil on Unity</title>
 <style>
   html,body{margin:0;height:100%;background:#0a0c11;overflow:hidden;overscroll-behavior:none}
@@ -29,6 +29,17 @@
      100%: no number a script measured can hold it short (the owner's black band, November 13). */
   #unity-container{position:fixed;inset:0;width:100%;height:100%;height:100dvh;overflow:hidden;background:#0a0c11}
   #unity-canvas{display:block;width:100%;height:100%;background:#0a0c11;touch-action:none}
+  /* Held (a phone upright, or the page hidden): the box keeps the size it last settled at on its side, so Unity keeps
+     its backing through a turn or a fold and sizes it once when the page settles on its side again (the owner's stop,
+     November 15: three backings in 0.2 s, an upright one among them, as a fold hid the page). */
+  #unity-container.held{right:auto;bottom:auto}
+  /* The turn screen (the golden copy, turn.html; its words text/en's, laid in by tools/package-unity-pages.mjs). */
+  #turn{display:none;position:fixed;inset:0;z-index:4;flex-direction:column;align-items:center;justify-content:center;
+    gap:8px;padding:24px;background:#0a0c11;color:#e9e2d0;font:16px system-ui,sans-serif;text-align:center}
+  #turn.on{display:flex}
+  #turn b{font:600 22px Georgia,serif;letter-spacing:.04em;color:#f3d999}
+  #turn i{font-style:normal;color:#a49a86}
+  #turn i[hidden]{display:none}
   #note{position:fixed;left:0;right:0;bottom:24px;text-align:center;color:#a49a86;font:14px system-ui,sans-serif}
   #step{display:block;margin-top:4px;padding:0 16px;font-size:12px;opacity:.75}
   #full{position:fixed;top:calc(20px + env(safe-area-inset-top));right:calc(20px + env(safe-area-inset-right));z-index:3;
@@ -42,6 +53,8 @@
 <body>
 <div id="unity-container"><canvas id="unity-canvas" tabindex="-1"></canvas></div>
 <div id="note"><span id="pct">Loading…</span><span id="step"></span></div>
+<div id="turn"><b id="turn-title"></b><span id="turn-line"></span><i id="turn-paused" hidden></i></div>
+<script id="vigil-words" type="application/json">{"turn.title":"Turn your device","turn.line":"Vigil is played with the screen on its side.","turn.paused":"The night is paused."}</script>
 <button id="full" type="button" aria-label="Full screen" title="Full screen" hidden>⛶</button>
 <script>
   // The Unity player (unity/, Assets/Vigil/Editor/VigilBuild.cs): WebGPU where the browser has it, else WebGL 2.
@@ -695,6 +708,43 @@
     // black band, November 13). The canvas is fixed to the page, so the larger is the page's whole height. Where the two
     // disagree, the boot log says so once, for the next report.
     let disagreed = '';
+    // The hold (#unity-container.held): the box's last size on its side, kept while a phone is upright or the page
+    // hidden, and let go once the page has settled on its side and is shown.
+    const container = document.getElementById('unity-container');
+    const turn = document.getElementById('turn');
+    {
+      let words = {};
+      try {
+        words = JSON.parse(document.getElementById('vigil-words').textContent);
+      } catch (e) {}
+      for (const key of ['title', 'line', 'paused'])
+        document.getElementById('turn-' + key).textContent = words['turn.' + key] || '';
+    }
+    // For the player (Plugins/WebGL/VigilScreen.jslib, Play/PageScreen.Turn): whether the turn screen is up, and the
+    // night it paused told back for its last line.
+    window.vigilUpright = () => turn.classList.contains('on');
+    window.vigilTurnPaused = (on) => (document.getElementById('turn-paused').hidden = !on);
+    let side = null;
+    let held = false;
+    const upright = () => matchMedia('(pointer: coarse)').matches && innerHeight > innerWidth;
+    const hold = (why) => {
+      turn.classList.toggle('on', upright());
+      if (held || !side) return;
+      held = true;
+      container.style.width = side[0] + 'px';
+      container.style.height = side[1] + 'px';
+      container.classList.add('held');
+      boot('canvas held at ' + side[0] + '×' + side[1] + ' (' + why + ')');
+    };
+    const release = (why) => {
+      turn.classList.toggle('on', upright());
+      if (!held) return;
+      held = false;
+      container.style.width = '';
+      container.style.height = '';
+      container.classList.remove('held');
+      boot('canvas let go (' + why + ')');
+    };
     const measure = () => {
       const v = window.visualViewport;
       const zoomed = v && Math.abs(v.scale - 1) >= 0.01;
@@ -721,6 +771,13 @@
       const now = measure();
       const size = apply(now);
       if (previous === size || left === 0) {
+        if (document.visibilityState === 'visible' && !upright()) {
+          release(why);
+          const b = container.getBoundingClientRect();
+          if (b.width >= b.height) side = [Math.round(b.width), Math.round(b.height)];
+        } else {
+          hold(why);
+        }
         if (size !== logged) {
           if (logged) boot('viewport settled at ' + size + ' (' + why + ')');
           logged = size;
@@ -730,6 +787,7 @@
       timers.push(setTimeout(() => read(why, size, left - 1), left > 3 ? 100 : 300));
     };
     const fit = (why) => {
+      if (document.visibilityState !== 'visible' || upright()) hold(why);
       for (const t of timers) clearTimeout(t);
       timers = [];
       read(why, null, 6);
@@ -737,7 +795,6 @@
     // What the page sees (the lead, November 13: the black band after a return in the installed app): every size the
     // fit could follow, logged to the boot log and the report, marked with what fired it; on a return, once a second
     // for ten seconds after as well.
-    const container = document.getElementById('unity-container');
     const box = (el) => {
       const b = el.getBoundingClientRect();
       return Math.round(b.width) + '×' + Math.round(b.height) + (b.left || b.top ? '@' + Math.round(b.left) + ',' + Math.round(b.top) : '');
@@ -749,7 +806,8 @@
         (v ? ' visual ' + Math.round(v.width) + '×' + Math.round(v.height) + ' top ' + Math.round(v.offsetTop) + ' scale ' + v.scale.toFixed(2) : '') +
         ' root ' + de.clientWidth + '×' + de.clientHeight + ' screen ' + screen.width + '×' + screen.height + ' dpr ' + devicePixelRatio +
         ' canvas ' + box(canvas) + ' backing ' + canvas.width + '×' + canvas.height + ' box ' + box(container) +
-        ' body ' + box(document.body) + ' html ' + box(de) + ' ' + app() + ' safe ' + insets() + ' ' + document.visibilityState;
+        ' body ' + box(document.body) + ' html ' + box(de) + ' ' + app() + ' safe ' + insets() + ' ' + document.visibilityState +
+        (held ? ' held' : '');
       boot('fit ' + line);
       recorder.add('fit', line);
     };
@@ -770,6 +828,7 @@
       });
     document.addEventListener('visibilitychange', () => {
       seen('visibility ' + document.visibilityState);
+      if (document.visibilityState !== 'visible') hold('hidden');
       if (document.visibilityState === 'visible') {
         fit('shown again');
         returned('shown again');
