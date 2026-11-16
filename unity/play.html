@@ -19,7 +19,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Vigil Unity">
 <meta name="theme-color" content="#0a0c11">
-<meta name="vigil-commit" content="83d1d85">
+<meta name="vigil-commit" content="8e24c22">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Vigil on Unity</title>
@@ -83,6 +83,9 @@
     // the log of the page that played.) PAGES lists the last few pages' ids; a key without an id is a build's before.
     const ID = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     const PAGES = 'vigil-unity-pages';
+    // The second ring: the game's lines about a hitch (VIGIL_HITCH, VIGIL_BURST, VIGIL_SCREEN, VIGIL_ADAPT, VIGIL_WARM),
+    // kept apart from the log so a long night's VIGIL_STATE lines do not push them out.
+    const MARKS = 'vigil-unity-marks';
     const of = (key, id) => (id ? key + '-' + id : key);
     // The night is kept in pieces, so each write is only what is new (a whole record rewritten every 5 s grew to
     // 700 KB in half an hour, and a write of it blocks the page): NIGHT its opening, where it stands and how many pieces;
@@ -120,6 +123,7 @@
     };
     const started = new Date().toISOString();
     const lines = [];
+    const marks = [];
     const session = { started, beat: started, ended: '', seconds: 0, page: location.pathname + location.search };
     // Which build this session runs, for its report's first line: the sealed site's build (its lock.json names it) and
     // the rpg commit it was built from (tools/package-unity-pages.mjs stamps it on the page).
@@ -137,6 +141,7 @@
     const save = () => {
       dirty = false;
       store.set(of(LOG, ID), JSON.stringify(lines));
+      store.set(of(MARKS, ID), JSON.stringify(marks));
       store.set(of(LAST, ID), JSON.stringify(session));
     };
     // Each distinct error once (its first 160 characters): when first seen, how often, and a stack where one is given,
@@ -162,6 +167,46 @@
       dirty = true;
       if (now) save();
     };
+    // The ten worst frames, each with the game's last VIGIL_STATE and VIGIL_SCREEN before it (and how long before)
+    // and its hitch lines within 2 s (the second ring's); the battery saver as the state lines told it (how many
+    // with it on and off), and the latest warmth (Quality/ThermalProxy).
+    session.worst = [];
+    session.saver = { on: 0, off: 0 };
+    session.warmth = '';
+    let lastState = null;
+    let lastScreen = null;
+    const clock = () => performance.now() / 1000;
+    const NEAR = 2;
+    function heard(text) {
+      const t = clock();
+      if (text.startsWith('VIGIL_STATE')) {
+        lastState = { t, text: text.slice(0, 300).trim() };
+        const saver = / saver (on|off);/.exec(text);
+        if (saver) session.saver[saver[1]]++;
+        const warmth = /; (warmth [^;]*);/.exec(text);
+        if (warmth) session.warmth = warmth[1];
+        return;
+      }
+      if (text.startsWith('VIGIL_SCREEN')) lastScreen = { t, text: text.slice(0, 300).trim() };
+      if (!/^VIGIL_(HITCH|BURST|SCREEN|ADAPT|WARM)/.test(text)) return;
+      const mark = '+' + t.toFixed(1) + 's ' + text.slice(0, 300).trim();
+      marks.push(mark);
+      if (marks.length > 150) marks.splice(0, marks.length - 150);
+      for (const w of session.worst) if (Math.abs(t - w.at) <= NEAR && w.near.length < 4) w.near.push(mark);
+      dirty = true;
+    }
+    const worstFrame = (gap, now) => {
+      const list = session.worst;
+      if (list.length >= 10 && gap <= list[list.length - 1].ms) return;
+      const at = +(now / 1000).toFixed(1);
+      const near = marks.filter((m) => Math.abs(parseFloat(m.slice(1)) - at) <= NEAR).slice(-4);
+      const w = { at, ms: gap, near };
+      if (lastState) Object.assign(w, { state: lastState.text, stateAge: +(at - lastState.t).toFixed(1) });
+      if (lastScreen) Object.assign(w, { screen: lastScreen.text, screenAge: +(at - lastScreen.t).toFixed(1) });
+      list.push(w);
+      list.sort((a, b) => b.ms - a.ms);
+      if (list.length > 10) list.length = 10;
+    };
     // The earlier pages' records: the one reported is the latest that played a night, else the latest heard; the
     // others are named in its report (another page of the game open at the same time).
     const before = (() => {
@@ -170,6 +215,7 @@
           id,
           session: JSON.parse(store.get(of(LAST, id)) || 'null'),
           log: JSON.parse(store.get(of(LOG, id)) || '[]'),
+          marks: JSON.parse(store.get(of(MARKS, id)) || '[]'),
           night: readNight(id),
         });
         const heard = (r) => Date.parse(r.session.beat || r.session.started) || 0;
@@ -187,7 +233,7 @@
         for (const id of listed.filter((p) => !kept.includes(p)).concat([null])) {
           const n = JSON.parse(store.get(of(NIGHT, id)) || 'null');
           for (let k = 0; n && k < (n.parts || 0); k++) store.remove(of(NIGHT, id) + '-' + k);
-          for (const key of [LOG, LAST, NIGHT]) store.remove(of(key, id));
+          for (const key of [LOG, MARKS, LAST, NIGHT]) store.remove(of(key, id));
         }
         store.set(PAGES, JSON.stringify(kept));
         if (!chosen) return { session: null, log: [], night: null, others: [] };
@@ -208,14 +254,25 @@
     // A night held is told from another by its opening's length, its ticks and its input's length.
     const nightPrint = (n) => (n && n.head ? n.head.length + ':' + n.ticks + ':' + (n.spans || '').length : '');
     const unoffered = !!(before.night && before.night.head) && store.get(NIGHT_OFFERED) !== nightPrint(before.night);
+    // One of the worst frames: when, how long, the game's last state and screen lines before it and how long before,
+    // and its hitch lines within 2 s.
+    const worstLine = (w) =>
+      '+' + w.at + 's ' + w.ms + ' ms' +
+      (w.state ? '; ' + w.stateAge + ' s after ' + w.state : '; no state yet') +
+      (w.screen ? '; ' + w.screenAge + ' s after ' + w.screen : '') +
+      (w.near && w.near.length ? '\n    ' + w.near.join('\n    ') : '');
     const report = (r, title) =>
       [
         title + (r.session && r.session.build ? ' (' + r.session.build + ')' : ''),
         'started ' + (r.session && r.session.started) + ', last heard ' + (r.session && r.session.beat) +
           ', ended ' + ((r.session && r.session.ended) || 'without closing') +
           (r.others && r.others.length ? '\nother pages of the game open about then: ' + JSON.stringify(r.others) : ''),
-        JSON.stringify(Object.assign({}, r.session, { errors: undefined })),
+        JSON.stringify(Object.assign({}, r.session, { errors: undefined, worst: undefined })),
         '',
+        ...(r.session && r.session.worst && r.session.worst.length
+          ? ['The worst frames:', ...r.session.worst.map(worstLine), '']
+          : []),
+        ...(r.marks && r.marks.length ? ['The hitch lines:', ...r.marks, ''] : []),
         ...Object.entries((r.session && r.session.errors) || {}).map(
           ([text, e]) => 'ERROR ' + e.first + ' x' + e.count + ' (' + e.kind + '): ' + text + (e.stack ? '\n  ' + e.stack.replace(/\n/g, '\n  ') : ''),
         ),
@@ -231,7 +288,8 @@
         : !b.ended && b.frames > 0 ? 'stopped unexpectedly'
         : b.errorCount > 0 ? 'logged ' + b.errorCount + ' error' + (b.errorCount > 1 ? 's' : '') + ', first: ' +
           Object.keys(b.errors || {})[0]
-        : b.hitches > 0 ? 'hitched (' + b.hitches + ' frames over ' + (b.hitchOverMs || 25) + ' ms, the longest ' + b.worstHitchMs + ' ms)'
+        : b.hitches > 0 ? 'hitched (' + b.hitches + ' frames over ' + (b.hitchOverMs || 25) + ' ms' +
+          (b.over25 != null ? ', ' + b.over25 + ' over 25 ms' : '') + ', the longest ' + b.worstHitchMs + ' ms)'
         : '';
       if (why) store.set(CRASH, report(before, 'Vigil on Unity: the last session ' + why));
     }
@@ -266,7 +324,9 @@
     {
       const real = console.log.bind(console);
       console.log = (...args) => {
-        add('log', args.join(' '));
+        const text = args.join(' ');
+        add('log', text);
+        if (text.startsWith('VIGIL_')) heard(text);
         real(...args);
       };
     }
@@ -328,6 +388,8 @@
     session.worstHitchMs = 0;
     session.hitchBands = { '25-50': 0, '50-100': 0, '100-250': 0, '250+': 0 };
     session.hitchTimes = [];
+    // Beside the floating line below, a fixed one: the frames over 25 ms whatever the pace.
+    session.over25 = 0;
     let lastFrame = 0;
     let stalled = 0;
     let pace = 16.7;
@@ -398,18 +460,25 @@
           if (stalled) {
             add('freeze', 'frames again after ' + (gap / 1000).toFixed(1) + ' s', true);
             stalled = 0;
-          } else if (gap > (session.hitchOverMs = Math.round(Math.max(25, 1.5 * pace)))) {
-            session.hitches++;
-            session.worstHitchMs = Math.max(session.worstHitchMs, gap);
-            session.hitchBands[gap < 50 ? '25-50' : gap < 100 ? '50-100' : gap < 250 ? '100-250' : '250+']++;
-            session.hitchTimes.push((now / 1000).toFixed(1) + 's:' + gap);
-            if (session.hitchTimes.length > 300) session.hitchTimes.shift();
-            session.hitchDetail.push(
-              (now / 1000).toFixed(1) + 's ' + gap + ' ms: display ' + Math.round(t - lastT) + ', began ' +
-                Math.round(late) + ' late, last ran ' + Math.round(lastRan) + (tasks.length ? '; ' + tasks.join(', ') : ''),
-            );
-            if (session.hitchDetail.length > 80) session.hitchDetail.shift();
-            if (gap >= 100) add('hitch', gap + ' ms between frames', gap >= 250);
+          } else {
+            session.hitchOverMs = Math.round(Math.max(25, 1.5 * pace));
+            if (gap > 25) {
+              session.over25++;
+              worstFrame(gap, now);
+            }
+            if (gap > session.hitchOverMs) {
+              session.hitches++;
+              session.worstHitchMs = Math.max(session.worstHitchMs, gap);
+              session.hitchBands[gap < 50 ? '25-50' : gap < 100 ? '50-100' : gap < 250 ? '100-250' : '250+']++;
+              session.hitchTimes.push((now / 1000).toFixed(1) + 's:' + gap);
+              if (session.hitchTimes.length > 300) session.hitchTimes.shift();
+              session.hitchDetail.push(
+                (now / 1000).toFixed(1) + 's ' + gap + ' ms: display ' + Math.round(t - lastT) + ', began ' +
+                  Math.round(late) + ' late, last ran ' + Math.round(lastRan) + (tasks.length ? '; ' + tasks.join(', ') : ''),
+              );
+              if (session.hitchDetail.length > 80) session.hitchDetail.shift();
+              if (gap >= 100) add('hitch', gap + ' ms between frames', gap >= 250);
+            }
           }
           session.frames++;
           // The usual frame: a slow average of the frames that were not hitches.
