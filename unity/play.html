@@ -19,7 +19,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Vigil Unity">
 <meta name="theme-color" content="#0a0c11">
-<meta name="vigil-commit" content="ea82541">
+<meta name="vigil-commit" content="a9afbb0">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Vigil on Unity</title>
@@ -612,9 +612,16 @@
     recorder.save();
   });
   const query = new URLSearchParams(location.search);
-  // A device whose WebGPU failed (Safari can lose its GPU device, or refuse a texture, on a later start) plays on
-  // WebGL 2 for a week, the same build's other graphics: kept in this browser, tried again after.
+  // A device whose WebGPU failed while the page was shown (Safari can lose its GPU device, or refuse a texture, on a
+  // later start) plays on WebGL 2 for a day, the same build's other graphics: kept in this browser, tried again after.
+  // A week (until November 18) kept an owner's iPhone on WebGL 2 at 20 fps after a page that was never shown. ?webgpu
+  // clears it; Settings, Debugging has "Try WebGPU again" (window.vigilTryWebGpu).
   const GL_KEY = 'vigil-unity-webgl-until';
+  const GL_FOR = 24 * 3600 * 1000;
+  if (query.has('webgpu'))
+    try {
+      localStorage.removeItem(GL_KEY);
+    } catch {}
   const glUntil = (() => {
     try {
       return Number(localStorage.getItem(GL_KEY)) || 0;
@@ -633,8 +640,16 @@
       webgpu: !hadGpu ? 'not offered by the browser'
         : !onWebGl ? 'offered and used'
         : query.has('webgl') ? 'offered; ?webgl asks for WebGL 2'
-        : 'offered; on WebGL 2 until ' + new Date(glUntil).toISOString() + ' after a WebGPU failure',
+        : 'offered; on WebGL 2 until ' + new Date(glUntil).toISOString() + ' (a day) after a WebGPU failure',
     });
+    // For the game (Plugins/WebGL/VigilScreen.jslib, Play/PageScreen): the graphics it runs on and why, one line.
+    window.vigilGraphics = () =>
+      !hadGpu || onWebGl
+        ? 'WebGL 2' +
+          (!hadGpu ? ', WebGPU not offered'
+            : query.has('webgl') ? ', asked for'
+            : ', WebGPU failed; WebGPU again ' + new Date(glUntil).toISOString())
+        : 'WebGPU';
     try {
       const gl = document.createElement('canvas').getContext('webgl2');
       const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
@@ -666,13 +681,57 @@
     }
   }
   if (onWebGl) Object.defineProperty(Navigator.prototype, 'gpu', { get: () => undefined });
-  /** A WebGPU failure: this device on WebGL 2 from now on (for a week), and the player started again on it. */
+  // "Try WebGPU again" (Settings, Debugging): the stored fallback cleared and the page started again on WebGPU.
+  window.vigilTryWebGpu = () => {
+    try {
+      localStorage.removeItem(GL_KEY);
+    } catch {}
+    const next = new URLSearchParams(location.search);
+    next.delete('webgl');
+    next.delete('webgpu');
+    location.replace(location.pathname + (next.toString() ? '?' + next.toString().replace(/=(&|$)/g, '$1') : ''));
+  };
+  // A page hidden, or shown again in the last 10 s, whose GPU work fails (iOS takes a backgrounded page's GPU device)
+  // has not shown WebGPU failing: it starts again on WebGPU once it is shown, at most twice in this tab, never onto
+  // WebGL 2. (The owner's iPhone, November 18: a page loaded and left in the background for 22 minutes, frames 0,
+  // fell to WebGL 2 for a week as it came back.)
+  // (shownAgain: when the page was last shown after being hidden; 0 while it has not been hidden.)
+  let shownAgain = 0;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') shownAgain = Date.now();
+  });
+  const RETRIES = 'vigil-unity-webgpu-retries';
+  const unseen = () =>
+    document.visibilityState !== 'visible' || (shownAgain > 0 && Date.now() - shownAgain < 10000);
+  const retried = () => {
+    try {
+      return Number(sessionStorage.getItem(RETRIES)) || 0;
+    } catch {
+      return 2;
+    }
+  };
+  const again = (why) => {
+    if (onWebGl || retried() >= 2) return false;
+    try {
+      sessionStorage.setItem(RETRIES, String(retried() + 1));
+    } catch {}
+    recorder.note({ webgpu: 'failed while hidden, started again on WebGPU: ' + String(why).slice(0, 120) });
+    boot('WebGPU failed while the page was hidden (' + String(why).slice(0, 120) + '): again on WebGPU once shown');
+    recorder.save();
+    const go = () => location.reload();
+    if (document.visibilityState === 'visible') go();
+    else
+      document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && go(), { once: true });
+    return true;
+  };
+  /** A WebGPU failure: this device on WebGL 2 for a day, and the player started again on it. */
   const fallBack = (why) => {
     if (onWebGl) return false;
+    if (unseen()) return again(why);
     recorder.note({ webgpu: 'failed: ' + String(why).slice(0, 160) });
     boot('WebGPU failed (' + String(why).slice(0, 160) + '): starting again on WebGL 2');
     try {
-      localStorage.setItem(GL_KEY, String(Date.now() + 7 * 24 * 3600 * 1000));
+      localStorage.setItem(GL_KEY, String(Date.now() + GL_FOR));
     } catch {}
     const next = new URLSearchParams(location.search);
     next.set('webgl', '');
@@ -1035,14 +1094,30 @@
           shown = now;
           boot('Unity loading ' + now + '%');
         }
-        // Loaded, but WebGPU never comes up (a failure swallowed inside it hangs the start): a minute on, WebGL 2.
-        if (progress >= 1 && !onWebGl && !stall)
-          stall = setTimeout(() => fallBack('no start a minute after loading'), 60000);
+        // Loaded, but WebGPU never comes up (a failure swallowed inside it hangs the start): a minute on, WebGL 2. The
+        // minute is the page's shown time only: a hidden page does not start (no frames are drawn), and its timers
+        // run late, so a page left in the background is not a failure (the owner's iPhone, November 18).
+        if (progress >= 1 && !onWebGl && !stall) {
+          let shown = 0;
+          let last = Date.now();
+          stall = setInterval(() => {
+            const now = Date.now();
+            if (document.visibilityState === 'visible') shown += Math.min(now - last, 2000);
+            last = now;
+            if (shown >= 60000) {
+              clearInterval(stall);
+              fallBack('no start a minute (shown) after loading');
+            }
+          }, 1000);
+        }
       });
     })
     .then((instance) => {
       boot('Unity started');
-      clearTimeout(stall);
+      clearInterval(stall);
+      try {
+        sessionStorage.removeItem(RETRIES);
+      } catch {}
       // Unity holds the data now: the joined copy can go.
       if (joined) URL.revokeObjectURL(joined);
       window.unityInstance = instance;
