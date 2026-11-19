@@ -19,7 +19,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Vigil Unity">
 <meta name="theme-color" content="#0a0c11">
-<meta name="vigil-commit" content="a9afbb0">
+<meta name="vigil-commit" content="fff046e">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Vigil on Unity</title>
@@ -622,9 +622,16 @@
     try {
       localStorage.removeItem(GL_KEY);
     } catch {}
+  // A key further than a day ahead was kept by an older page (a week, before November 18): cut to a day from now, so
+  // a phone it held on WebGL 2 tries WebGPU again within a day without being asked.
   const glUntil = (() => {
     try {
-      return Number(localStorage.getItem(GL_KEY)) || 0;
+      const kept = Number(localStorage.getItem(GL_KEY)) || 0;
+      if (kept > Date.now() + GL_FOR) {
+        localStorage.setItem(GL_KEY, String(Date.now() + GL_FOR));
+        return Date.now() + GL_FOR;
+      }
+      return kept;
     } catch {
       return 0;
     }
