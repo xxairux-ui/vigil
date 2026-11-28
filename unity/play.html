@@ -19,7 +19,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Vigil Unity">
 <meta name="theme-color" content="#0a0c11">
-<meta name="vigil-commit" content="e71ccad">
+<meta name="vigil-commit" content="bb007f2">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Vigil on Unity</title>
@@ -166,10 +166,10 @@
     // NIGHT-<k> each piece's closed spans and actions.
     const readNight = (id) => {
       const n = JSON.parse(store.get(of(NIGHT, id)) || 'null');
-      if (!n || !n.parts) return n;
+      if (!n) return n;
       const spans = [];
       const actions = [];
-      for (let k = 0; k < n.parts; k++) {
+      for (let k = 0; k < (n.parts || 0); k++) {
         const part = JSON.parse(store.get(of(NIGHT, id) + '-' + k) || '{}');
         if (part.s) spans.push(part.s);
         if (part.a) actions.push(part.a);
@@ -322,11 +322,13 @@
         return { session: null, log: [], night: null, others: [] };
       }
     })();
-    // The record, whole, as NightRecord.Read reads it.
+    // The record, whole, as NightRecord.Read reads it: from readNight, which puts its pieces together (the live `night`
+    // holds only the opening and the open span; a report made from it carried one span and "actions":[undefined], the
+    // owner's of November 28).
     const record = (n) =>
       n && n.head
         ? n.head + ',"ticks":' + n.ticks + ',"inputs":[' + [n.spans, n.open].filter(Boolean).join(',') +
-          '],"actions":[' + n.actions + ']}'
+          '],"actions":[' + (n.actions || '') + ']}'
         : '';
     // A night held is told from another by its opening's length, its ticks and its input's length.
     const nightPrint = (n) => (n && n.head ? n.head.length + ':' + n.ticks + ':' + (n.spans || '').length : '');
@@ -764,7 +766,7 @@
       save();
       let text = report({ session, log: lines.slice() }, 'Vigil on Unity: this session');
       try {
-        text += await packed(night ? record(night) : '');
+        text += await packed(night ? record(readNight(ID)) : '');
       } catch {}
       offer(text, 'This session’s report: copy it and send it.');
     };
@@ -780,7 +782,7 @@
       save();
       let text = report({ session, log: lines.slice() }, 'Vigil on Unity: this session stopped');
       try {
-        text += await packed(night ? record(night) : '');
+        text += await packed(night ? record(readNight(ID)) : '');
       } catch {}
       offer(text, 'The game stopped. Copy this report and send it, then reload.', { reload: true });
     };
