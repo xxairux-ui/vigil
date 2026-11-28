@@ -19,7 +19,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Vigil Unity">
 <meta name="theme-color" content="#0a0c11">
-<meta name="vigil-commit" content="f1f5229">
+<meta name="vigil-commit" content="c033910">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Vigil on Unity</title>
@@ -552,6 +552,63 @@
     // starts, as Unity's own count reads it), the display's own time for it (t, the frame's timestamp: a gap of
     // about 2 frames there is a frame the display missed, about 1 a frame begun late), how late it began after t, and
     // how long the main loop's last frame ran. A late one keeps all of these with what ran before it (hitchDetail).
+    // The GPU's own work, as the WebGPU device is asked for it (the device's doors wrapped below, where the page has
+    // WebGPU): pipelines, shader modules and textures made, each timed, its label kept. The session counts them all;
+    // each frame's list goes with the frame's hitch line, so a hitch says what it built ("3 pipelines 700 ms: …").
+    session.gpuMade = { pipelines: 0, pipelineMs: 0, modules: 0, moduleMs: 0, textures: 0, textureMs: 0 };
+    let madeNow = [];
+    const gpuMade = (kind, ms, label) => {
+      const t = session.gpuMade;
+      const key = kind === 'pipeline' ? 'pipeline' : kind === 'module' ? 'module' : 'texture';
+      t[key + 's']++;
+      t[key + 'Ms'] = Math.round((t[key + 'Ms'] + ms) * 10) / 10;
+      if (madeNow.length < 40) madeNow.push({ key, ms, label: label ? String(label).slice(0, 60) : '' });
+    };
+    const madeLine = () => {
+      if (!madeNow.length) return '';
+      const parts = [];
+      for (const key of ['pipeline', 'module', 'texture']) {
+        const of = madeNow.filter((m) => m.key === key);
+        if (!of.length) continue;
+        const ms = Math.round(of.reduce((a, m) => a + m.ms, 0));
+        const labels = [...new Set(of.map((m) => m.label).filter(Boolean))].slice(0, 6);
+        parts.push(of.length + ' ' + key + (of.length > 1 ? 's ' : ' ') + ms + ' ms' + (labels.length ? ' (' + labels.join(', ') + ')' : ''));
+      }
+      return 'made ' + parts.join(', ');
+    };
+    // The device's doors that build GPU work (a WebGPU device's class, `Device`), each timed into gpuMade: rare calls,
+    // so nothing a frame when none is made. An async pipeline is timed to its promise's answer.
+    const wrapGpu = (Device) => {
+      const doors = {
+        createRenderPipeline: 'pipeline',
+        createComputePipeline: 'pipeline',
+        createShaderModule: 'module',
+        createTexture: 'texture',
+      };
+      for (const [name, kind] of Object.entries(doors)) {
+        const real = Device.prototype[name];
+        if (typeof real !== 'function') continue;
+        Device.prototype[name] = function (descriptor) {
+          const t0 = performance.now();
+          try {
+            return real.call(this, descriptor);
+          } finally {
+            gpuMade(kind, performance.now() - t0, descriptor && descriptor.label);
+          }
+        };
+      }
+      for (const name of ['createRenderPipelineAsync', 'createComputePipelineAsync']) {
+        const real = Device.prototype[name];
+        if (typeof real !== 'function') continue;
+        Device.prototype[name] = function (descriptor) {
+          const t0 = performance.now();
+          const made = real.call(this, descriptor);
+          const told = () => gpuMade('pipeline', performance.now() - t0, descriptor && descriptor.label);
+          Promise.resolve(made).then(told, told);
+          return made;
+        };
+      }
+    };
     const mainLoop = new WeakSet();
     let lastT = 0;
     let lastRan = 0;
@@ -593,10 +650,11 @@
               if (session.hitchTimes.length > 300) session.hitchTimes.shift();
               session.hitchDetail.push(
                 (now / 1000).toFixed(1) + 's ' + gap + ' ms: display ' + Math.round(t - lastT) + ', began ' +
-                  Math.round(late) + ' late, last ran ' + Math.round(lastRan) + (tasks.length ? '; ' + tasks.join(', ') : ''),
+                  Math.round(late) + ' late, last ran ' + Math.round(lastRan) + (tasks.length ? '; ' + tasks.join(', ') : '') +
+                  (madeNow.length ? '; ' + madeLine() : ''),
               );
               if (session.hitchDetail.length > 80) session.hitchDetail.shift();
-              if (gap >= 100) add('hitch', gap + ' ms between frames', gap >= 250);
+              if (gap >= 100) add('hitch', gap + ' ms between frames' + (madeNow.length ? ': ' + madeLine() : ''), gap >= 250);
             }
           }
           session.frames++;
@@ -604,6 +662,7 @@
           if (gap < 100) pace += (Math.min(gap, 1.5 * pace) - pace) * 0.02;
         }
         tasks = [];
+        madeNow = [];
         lastT = t;
         lastFrame = now;
         try {
@@ -725,7 +784,7 @@
       } catch {}
       offer(text, 'The game stopped. Copy this report and send it, then reload.', { reload: true });
     };
-    return { add, save, fault, note, now, fail };
+    return { add, save, fault, note, now, fail, gpuMade, wrapGpu };
   })();
   // A line of the boot log (the console, so the recorder keeps it) for the report alone: never the loading screen's
   // step, which a player reads (a builder's line such as "canvas under the floor" is not theirs: writing.md).
@@ -813,6 +872,8 @@
     // The compressed textures the device can take: the adapter's features, and those Unity asks its device for.
     // Unity unpacks a texture to 32 bits a texel only where its device lacks the format, so a format in both lists is
     // sampled as shipped (the report's VIGIL_TEXTURES line reads Unity's own answer, SystemInfo.SupportsTextureFormat).
+    // The device's doors that build GPU work, each timed for the recorder (gpuMade, recorder.wrapGpu).
+    if (hadGpu && !onWebGl && window.GPUDevice) recorder.wrapGpu(GPUDevice);
     if (hadGpu && !onWebGl && window.GPUAdapter) {
       const real = GPUAdapter.prototype.requestDevice;
       GPUAdapter.prototype.requestDevice = function (descriptor) {
