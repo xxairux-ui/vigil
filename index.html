@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Vigil</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Vigil">
+<meta name="theme-color" content="#0a0c11">
+<style>html,body{margin:0;height:100%;background:#0a0c11}</style>
+<style>
+  body{display:flex;align-items:center;justify-content:center;font-family:Georgia,serif;color:#e9e2d0;
+    background:radial-gradient(ellipse at 50% 30%,#1d1a16,#0a0c11 70%)}
+  @font-face{font-family:Gate;src:url(./gate-font.ttf)}
+  main{width:min(360px,calc(100vw - 32px));text-align:center}
+  h1{font:600 54px Gate,Georgia,serif;letter-spacing:.14em;margin:0 0 4px;color:#f3d999}
+  p{margin:0 0 18px;color:#a49a86;font-style:italic}
+  form{display:flex;flex-direction:column;gap:10px}
+  input{padding:12px;border:1px solid #4a4134;border-radius:3px;background:#0e0d0c;color:#e9e2d0;font-size:16px;text-align:center}
+  input:focus{outline:none;border-color:#d8b468}
+  button{padding:12px;border:1px solid #d8b468;border-radius:3px;background:linear-gradient(#3a2f1c,#221b10);
+    color:#f3d999;font:600 16px Georgia,serif;letter-spacing:.08em;cursor:pointer}
+  button:disabled{opacity:.6}
+  .note{min-height:20px;margin-top:12px;font:14px system-ui,sans-serif;color:#a49a86}
+  .bad{color:#ff8a7a}
+</style>
+</head>
+<body>
+<main>
+  <h1>VIGIL</h1>
+  <p>Hold the court until dawn.</p>
+  <form id="f">
+    <input id="pw" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required>
+    <button id="go">Enter</button>
+  </form>
+  <div class="note" id="note"></div>
+</main>
+<script type="module">
+  const note = document.getElementById('note');
+  const go = document.getElementById('go');
+  const say = (text, bad = false) => { note.textContent = text; note.className = bad ? 'note bad' : 'note'; };
+  if (!('serviceWorker' in navigator) || !crypto.subtle) {
+    say('This browser cannot open Vigil (it needs service workers and Web Crypto, over HTTPS).', true);
+    go.disabled = true;
+  }
+  // Nothing is under way on the gate: a newer version asking may take over.
+  navigator.serviceWorker?.addEventListener('message', (e) => {
+    if (e.data === 'state?' && e.ports[0]) e.ports[0].postMessage('idle');
+  });
+  const idb = () => new Promise((res, rej) => {
+    const r = indexedDB.open('vigil-lock', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('k');
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  const store = async (mode, act) => {
+    const db = await idb();
+    return new Promise((res, rej) => {
+      const t = db.transaction('k', mode);
+      const q = act(t.objectStore('k'));
+      t.oncomplete = () => res(q && q.result);
+      t.onerror = () => rej(t.error);
+    });
+  };
+  const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  async function open() {
+    // The worker in charge before the game's page loads, so its files are unsealed as it asks for them.
+    const reg = await navigator.serviceWorker.register('./sw.js', { scope: './' });
+    // A newer version: let it install (it fetches only the files that changed) and take over now, as nothing is
+    // under way here. It waits, though, while another copy of the game is mid-night.
+    await reg.update().catch(() => {});
+    const fresh = reg.installing;
+    if (fresh) {
+      say('Updating…');
+      await new Promise((res) => {
+        const done = () => fresh.state !== 'installing' && res();
+        fresh.addEventListener('statechange', done);
+        done();
+      });
+    }
+    if (reg.waiting && reg.active) {
+      const taken = new Promise((res) => {
+        navigator.serviceWorker.addEventListener('controllerchange', res, { once: true });
+        setTimeout(res, 5000);
+      });
+      reg.waiting.postMessage('skip');
+      await taken;
+    }
+    await navigator.serviceWorker.ready;
+    location.replace('./play.html');
+  }
+  // ?lock forgets the key here.
+  if (location.search.includes('lock')) {
+    await store('readwrite', (s) => s.delete('key')).catch(() => {});
+    navigator.serviceWorker.controller?.postMessage('lock');
+    history.replaceState(null, '', './');
+    say('Locked.');
+  } else if (await store('readonly', (s) => s.get('key')).catch(() => null)) {
+    say('Opening…');
+    await open();
+  }
+  document.getElementById('f').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    go.disabled = true;
+    say('Unsealing…');
+    try {
+      const lock = await (await fetch('./lock.json', { cache: 'no-store' })).json();
+      const raw = new TextEncoder().encode(document.getElementById('pw').value);
+      const base = await crypto.subtle.importKey('raw', raw, 'PBKDF2', false, ['deriveKey']);
+      const kek = await crypto.subtle.deriveKey(
+        { name: 'PBKDF2', hash: 'SHA-256', salt: b64(lock.salt), iterations: lock.iterations },
+        base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+      void raw.fill(0);
+      // A wrong password fails here: the build's key does not unseal.
+      const sealed = b64(lock.key);
+      await crypto.subtle.decrypt({ name: 'AES-GCM', iv: sealed.slice(0, 12) }, kek, sealed.slice(12));
+      await store('readwrite', (s) => s.put(kek, 'key'));
+      say('Opening…');
+      await open();
+    } catch (err) {
+      say(err && err.name === 'OperationError' ? 'That is not the password.' : 'Could not open: ' + err, true);
+      go.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
